@@ -11,12 +11,13 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@supabase/supabase-js": "^2.118.0",
     "hono": "^4.13.13",
-    "stripe": "^23.0.0"
+    "stripe": "^23.0.1"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.23.0",
     "vitest": "^4.1.0",
-    "wrangler": "^4.151.3"
+    "wrangler": "^4.152.0"
   }
 }
