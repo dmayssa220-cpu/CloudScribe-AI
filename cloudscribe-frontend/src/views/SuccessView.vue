@@ -1,3 +1,14 @@
+<script setup>
+import { onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+
+const router = useRouter()
+
+onMounted(() => {
+  window.setTimeout(() => router.push('/'), 3000)
+})
+</script>
+
 <template>
   <div class="container">
     <h1>Paiement Réussi ! 🎉</h1>

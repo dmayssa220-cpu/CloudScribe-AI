@@ -1,13 +1,20 @@
 <script setup>
 import { ref } from 'vue';
+import { supabase } from '../supabase';
 
 const loading = ref(false);
 
 const subscribePremium = async () => {
   loading.value = true;
   try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('Utilisateur non connecté');
+
     const response = await fetch('http://localhost:8787/api/create-checkout-session', {
-      method: 'POST'
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.access_token}`
+      }
     });
     const data = await response.json();
     
