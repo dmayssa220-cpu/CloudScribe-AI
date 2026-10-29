@@ -3,8 +3,11 @@ import { computed, ref } from 'vue';
 import { marked } from 'marked';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
+import { supabase } from '../supabase';
+import ReportChat from './ReportChat.vue';
 
 const props = defineProps({
+  id: { type: String, default: null },
   content: { type: String, required: true },
   tier: { type: String, default: 'normal' },
   date: { type: String, default: () => new Date().toISOString() },
@@ -12,10 +15,18 @@ const props = defineProps({
   imageMimeType: { type: String, default: null }
 });
 
+// --- ÉTATS ---
 const isDownloading = ref(false);
 const isCopied = ref(false);
+const currentContent = ref(props.content); // Contenu affiché (peut être traduit)
+const isTranslating = ref(false);
+const selectedLang = ref('fr');
+const tasks = ref([]);
+const isExtracting = ref(false);
+const tasksError = ref('');
 
-const htmlContent = computed(() => marked.parse(props.content || ''));
+// --- COMPUTED ---
+const htmlContent = computed(() => marked.parse(currentContent.value || ''));
 const formattedDate = computed(() => {
   return new Date(props.date).toLocaleDateString('fr-FR', {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
@@ -29,6 +40,7 @@ const getImageSrc = computed(() => {
   return null;
 });
 
+// --- ACTIONS PDF & PARTAGE ---
 const downloadPDF = async () => {
   isDownloading.value = true;
   const element = document.getElementById(`report-${props.date}`);
@@ -49,8 +61,7 @@ const downloadPDF = async () => {
 
 const copyToClipboard = () => {
   const el = document.getElementById(`report-${props.date}`);
-  const text = el.innerText || props.content;
-  navigator.clipboard.writeText(text);
+  navigator.clipboard.writeText(el.innerText || currentContent.value);
   isCopied.value = true;
   setTimeout(() => isCopied.value = false, 2000);
 };
@@ -74,11 +85,79 @@ const shareNative = async () => {
     }
   } catch (err) { console.log(err); }
 };
+
+// --- TRADUCTION ---
+const translateReport = async () => {
+  if (selectedLang.value === 'fr' && currentContent.value === props.content) return; // Déjà en FR
+  isTranslating.value = true;
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const response = await fetch('http://localhost:8787/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+      body: JSON.stringify({ text: props.content, language: selectedLang.value })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    
+    currentContent.value = data.translatedText;
+  } catch (err) {
+    alert("Erreur de traduction: " + err.message);
+  } finally {
+    isTranslating.value = false;
+  }
+};
+
+// --- EXTRACTION DES TÂCHES ---
+const extractTasks = async () => {
+  isExtracting.value = true;
+  tasksError.value = '';
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('Vous devez être connecté pour extraire les tâches.');
+
+    const res = await fetch('http://localhost:8787/api/extract-tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+      body: JSON.stringify({ reportId: props.id, text: props.content })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erreur lors de l’extraction des tâches.');
+    tasks.value = data.tasks || [];
+    if (data.warning) tasksError.value = data.warning;
+  } catch (err) {
+    tasksError.value = err instanceof Error ? err.message : 'Erreur lors de l’extraction des tâches.';
+  } finally {
+    isExtracting.value = false;
+  }
+};
+
+const toggleTask = async (task) => {
+  task.is_done = !task.is_done;
+  if (task.id) {
+    await supabase.from('tasks').update({ is_done: task.is_done }).eq('id', task.id);
+  }
+};
 </script>
 
 <template>
   <div class="report-wrapper">
-    <!-- Zone capturée pour le PDF -->
+    <!-- Barre d'outils supérieure (Traduction) -->
+    <div class="top-toolbar">
+      <div class="lang-selector">
+        <span>🌐 Traduire :</span>
+        <select v-model="selectedLang" @change="translateReport" :disabled="isTranslating">
+          <option value="fr">Français</option>
+          <option value="en">Anglais</option>
+          <option value="es">Espagnol</option>
+          <option value="de">Allemand</option>
+          <option value="ar">Arabe</option>
+        </select>
+        <span v-if="isTranslating" class="translating-text">Traduction...</span>
+      </div>
+    </div>
+
+    <!-- Document (Capturé pour le PDF) -->
     <div :id="`report-${date}`" class="report-design">
       <div class="report-header">
         <div class="logo-area">
@@ -88,10 +167,8 @@ const shareNative = async () => {
         <span class="date">{{ formattedDate }}</span>
       </div>
       
-      <!-- Contenu Markdown rendu -->
       <div class="report-body markdown-body" v-html="htmlContent"></div>
 
-      <!-- Image Source si présente -->
       <div v-if="getImageSrc" class="report-image">
         <p class="image-title">📸 Image source analysée :</p>
         <img :src="getImageSrc" alt="Image analysée" />
@@ -102,7 +179,7 @@ const shareNative = async () => {
       </div>
     </div>
 
-    <!-- Barre d'actions moderne -->
+    <!-- Boutons d'action -->
     <div class="action-bar">
       <button @click="copyToClipboard" class="action-btn btn-gray" :title="isCopied ? 'Copié !' : 'Copier le texte'">
         {{ isCopied ? '✅' : '📋' }}
@@ -112,6 +189,24 @@ const shareNative = async () => {
       </button>
       <button @click="shareNative" class="action-btn btn-green" title="Partager le fichier">📤</button>
     </div>
+
+    <!-- Section Extraction de tâches -->
+    <div class="tasks-section">
+      <button @click="extractTasks" :disabled="isExtracting" class="btn-tasks">
+        {{ isExtracting ? '⏳ Extraction...' : '✅ Extraire les actions (To-Do)' }}
+      </button>
+      <p v-if="tasksError" class="tasks-error">{{ tasksError }}</p>
+      
+      <div v-if="tasks.length > 0" class="task-list">
+        <div v-for="task in tasks" :key="task.id" class="task-item">
+          <input type="checkbox" v-model="task.is_done" @change="toggleTask(task)" />
+          <span :class="{ 'done': task.is_done }">{{ task.content }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chat avec le document -->
+    <ReportChat v-if="currentContent" :documentText="currentContent" />
   </div>
 </template>
 
@@ -245,4 +340,17 @@ const shareNative = async () => {
 .btn-gray { color: #4a5568; border: 1px solid #e2e8f0; }
 .btn-blue { color: #3182ce; border: 1px solid #bee3f8; background: #ebf8ff; }
 .btn-green { color: #38a169; border: 1px solid #c6f6d5; background: #f0fff4; }
+.top-toolbar { display: flex; justify-content: flex-end; margin-bottom: 15px; width: 100%; max-width: 800px; }
+.lang-selector { display: flex; align-items: center; gap: 10px; font-size: 0.9rem; color: #4a5568; }
+.lang-selector select { padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e0; outline: none; font-family: inherit; font-size: 0.9rem; cursor: pointer; }
+.translating-text { color: #3182ce; font-style: italic; font-size: 0.85rem; }
+
+.tasks-section { margin-top: 20px; width: 100%; max-width: 800px; background: white; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; }
+.btn-tasks { background: #edf2f7; color: #2d3748; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+.btn-tasks:hover { background: #e2e8f0; }
+.tasks-error { color: #b42318; margin: 8px 0; }
+.task-list { margin-top: 15px; display: flex; flex-direction: column; gap: 10px; }
+.task-item { display: flex; align-items: center; gap: 10px; font-size: 0.95rem; color: #2d3748; }
+.task-item input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; accent-color: #38a169; }
+.task-item .done { text-decoration: line-through; color: #a0aec0; }
 </style>
