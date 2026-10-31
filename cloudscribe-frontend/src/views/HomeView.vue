@@ -12,6 +12,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 const notes = ref('');
 const tier = ref('normal');
 const result = ref('');
+const reportId = ref(null);
 const loading = ref(false);
 const errorMsg = ref('');
 const fileInput = ref(null);
@@ -92,6 +93,7 @@ const generateReport = async () => {
     if (!response.ok) throw new Error(data.error || 'Erreur lors de la génération');
     
     result.value = data.result;
+    reportId.value = data.id || null;
     sessionStorage.setItem('cloudscribe-result', data.result);
   } catch (err) {
     errorMsg.value = err.message;
@@ -106,6 +108,7 @@ const clearForm = () => {
   imageBase64.value = null;
   imageMimeType.value = null;
   result.value = '';
+  reportId.value = null;
   sessionStorage.removeItem('cloudscribe-result');
 };
 </script>
@@ -166,6 +169,7 @@ const clearForm = () => {
     <!-- Affichage du résultat via le composant réutilisable -->
     <ReportDisplay 
       v-if="result" 
+      :id="reportId"
       :content="result" 
       :tier="tier" 
       :imageBase64="imageBase64" 

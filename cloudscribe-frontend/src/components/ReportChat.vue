@@ -42,7 +42,10 @@ const askQuestion = async () => {
     
     messages.value.push({ role: 'assistant', content: data.answer });
   } catch (err) {
-    messages.value.push({ role: 'assistant', content: "Désolé, une erreur est survenue." });
+    messages.value.push({
+      role: 'assistant',
+      content: err instanceof Error ? err.message : 'Une erreur est survenue pendant la discussion.'
+    });
   } finally {
     loading.value = false;
   }

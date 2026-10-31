@@ -12,20 +12,23 @@ const props = defineProps({
   tier: { type: String, default: 'normal' },
   date: { type: String, default: () => new Date().toISOString() },
   imageBase64: { type: String, default: null },
-  imageMimeType: { type: String, default: null }
+  imageMimeType: { type: String, default: null },
+  sentiment: { type: String, default: 'Neutre' },
+  sentimentScore: { type: Number, default: 50 },
+  sentimentExplication: { type: String, default: '' }
 });
 
-// --- ÉTATS ---
+
 const isDownloading = ref(false);
 const isCopied = ref(false);
-const currentContent = ref(props.content); // Contenu affiché (peut être traduit)
+const currentContent = ref(props.content); 
 const isTranslating = ref(false);
 const selectedLang = ref('fr');
 const tasks = ref([]);
 const isExtracting = ref(false);
 const tasksError = ref('');
 
-// --- COMPUTED ---
+
 const htmlContent = computed(() => marked.parse(currentContent.value || ''));
 const formattedDate = computed(() => {
   return new Date(props.date).toLocaleDateString('fr-FR', {
@@ -40,7 +43,6 @@ const getImageSrc = computed(() => {
   return null;
 });
 
-// --- ACTIONS PDF & PARTAGE ---
 const downloadPDF = async () => {
   isDownloading.value = true;
   const element = document.getElementById(`report-${props.date}`);
@@ -86,7 +88,7 @@ const shareNative = async () => {
   } catch (err) { console.log(err); }
 };
 
-// --- TRADUCTION ---
+
 const translateReport = async () => {
   if (selectedLang.value === 'fr' && currentContent.value === props.content) return; // Déjà en FR
   isTranslating.value = true;
@@ -108,7 +110,7 @@ const translateReport = async () => {
   }
 };
 
-// --- EXTRACTION DES TÂCHES ---
+
 const extractTasks = async () => {
   isExtracting.value = true;
   tasksError.value = '';
@@ -133,16 +135,21 @@ const extractTasks = async () => {
 };
 
 const toggleTask = async (task) => {
-  task.is_done = !task.is_done;
   if (task.id) {
-    await supabase.from('tasks').update({ is_done: task.is_done }).eq('id', task.id);
+    const { error } = await supabase.from('tasks').update({ is_done: task.is_done }).eq('id', task.id);
+    if (error) tasksError.value = 'La tâche est cochée, mais son état n’a pas pu être sauvegardé.';
   }
 };
+const sentimentColor = computed(() => {
+  if (props.sentimentScore > 60) return '#38a169'; 
+  if (props.sentimentScore < 40) return '#e53e3e'; 
+  return '#d69e2e'; 
+});
 </script>
 
 <template>
   <div class="report-wrapper">
-    <!-- Barre d'outils supérieure (Traduction) -->
+   
     <div class="top-toolbar">
       <div class="lang-selector">
         <span>🌐 Traduire :</span>
@@ -157,7 +164,7 @@ const toggleTask = async (task) => {
       </div>
     </div>
 
-    <!-- Document (Capturé pour le PDF) -->
+    
     <div :id="`report-${date}`" class="report-design">
       <div class="report-header">
         <div class="logo-area">
@@ -179,7 +186,7 @@ const toggleTask = async (task) => {
       </div>
     </div>
 
-    <!-- Boutons d'action -->
+    
     <div class="action-bar">
       <button @click="copyToClipboard" class="action-btn btn-gray" :title="isCopied ? 'Copié !' : 'Copier le texte'">
         {{ isCopied ? '✅' : '📋' }}
@@ -190,7 +197,7 @@ const toggleTask = async (task) => {
       <button @click="shareNative" class="action-btn btn-green" title="Partager le fichier">📤</button>
     </div>
 
-    <!-- Section Extraction de tâches -->
+    
     <div class="tasks-section">
       <button @click="extractTasks" :disabled="isExtracting" class="btn-tasks">
         {{ isExtracting ? '⏳ Extraction...' : '✅ Extraire les actions (To-Do)' }}
@@ -205,7 +212,7 @@ const toggleTask = async (task) => {
       </div>
     </div>
 
-    <!-- Chat avec le document -->
+    
     <ReportChat v-if="currentContent" :documentText="currentContent" />
   </div>
 </template>

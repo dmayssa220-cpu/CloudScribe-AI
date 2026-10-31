@@ -47,6 +47,7 @@ onMounted(() => { fetchHistory(); });
     <div v-else class="history-list">
       <div v-for="item in history" :key="item.id" class="history-item">
         <ReportDisplay 
+          :id="item.id"
           :content="item.generated_text" 
           :tier="item.tier" 
           :date="item.created_at"

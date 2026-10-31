@@ -97,6 +97,29 @@ app.post('/api/generate', async (c) => {
     if (!geminiResponse.ok) {
       const errorData = await geminiResponse.text();
       console.error('Erreur Gemini:', errorData);
+      if (geminiResponse.status === 429) {
+        let retryMessage = '';
+        try {
+          const retryDelay = JSON.parse(errorData).error?.details
+            ?.find((detail) => detail['@type']?.endsWith('RetryInfo'))?.retryDelay;
+          const retrySeconds = Number.parseInt(retryDelay, 10);
+          if (Number.isFinite(retrySeconds)) {
+            const totalMinutes = Math.ceil(retrySeconds / 60);
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+            retryMessage = ` Réessayez dans environ ${hours} h ${minutes} min.`;
+          }
+        } catch {
+         
+        }
+
+        return c.json({
+          error: `Le quota quotidien de l’IA est épuisé.${retryMessage} Vous pouvez attendre son renouvellement ou vérifier la facturation et les limites dans Google AI Studio.`
+        }, 429);
+      }
+      if (geminiResponse.status === 503) {
+        return c.json({ error: 'Le service IA est temporairement surchargé. Réessayez dans quelques minutes.' }, 503);
+      }
       return c.json({ error: 'Erreur lors de l\'appel à l\'IA.' }, 502);
     }
 
@@ -104,7 +127,33 @@ app.post('/api/generate', async (c) => {
     const generatedText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!generatedText) return c.json({ error: 'L\'IA n\'a pas pu générer de réponse.' }, 500);
+      
+    let sentimentData = { sentiment: 'Neutre', score: 50, explication: 'Aucune analyse disponible.' };
+    try {
+      const sentimentPrompt = `Analyse le ton de ces notes de réunion. 
+Réponds UNIQUEMENT avec un objet JSON valide (sans markdown) contenant :
+- "sentiment": "Positif", "Neutre" ou "Négatif"
+- "score": un nombre de 0 à 100 (0 = très négatif, 100 = très positif)
+- "explication": une phrase courte expliquant pourquoi.
 
+Notes : ${notes}`;
+
+      const sentResponse = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.env.GEMINI_API_KEY },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: sentimentPrompt }] }],
+          generationConfig: { responseMimeType: "application/json" }
+        })
+      });
+      
+      if (sentResponse.ok) {
+        const sentData = await sentResponse.json();
+        sentimentData = JSON.parse(sentData.candidates[0].content.parts[0].text);
+      }
+    } catch (e) {
+      console.error("Erreur analyse sentiment:", e);
+    }
    
     const { data, error: dbError } = await supabase
       .from('reports')
@@ -114,7 +163,10 @@ app.post('/api/generate', async (c) => {
         tier: tier,
         user_id: user.id,
          image_base64: imageBase64 || null,     
-        image_mime_type: imageMimeType || null  
+        image_mime_type: imageMimeType || null  ,
+        sentiment: sentimentData.sentiment,      
+        sentiment_score: sentimentData.score,  
+        sentiment_explication: sentimentData.explication 
       })
       .select()
       .single();
@@ -261,10 +313,21 @@ Question actuelle de l'utilisateur : ${question}`;
       })
     });
 
-    if (!geminiResponse.ok) throw new Error('Erreur API Gemini');
+    if (!geminiResponse.ok) {
+      const errorDetails = await geminiResponse.text();
+      console.error('Erreur Gemini chat:', errorDetails);
+      if (geminiResponse.status === 503) {
+        return c.json({ error: 'Le service IA est temporairement surchargé. Réessayez dans quelques minutes.' }, 503);
+      }
+      if (geminiResponse.status === 429) {
+        return c.json({ error: 'Le quota Gemini est épuisé. Vérifiez vos limites et la facturation Google AI Studio.' }, 429);
+      }
+      return c.json({ error: 'Le service IA n’a pas pu répondre à cette question.' }, 502);
+    }
 
     const geminiData = await geminiResponse.json();
     const answer = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!answer) return c.json({ error: 'Le service IA a renvoyé une réponse vide.' }, 502);
 
     return c.json({ answer });
 
@@ -290,9 +353,11 @@ app.post('/api/extract-tasks', async (c) => {
       return c.json({ error: 'Le compte rendu est vide.' }, 400);
     }
 
-    const prompt = `Extrais toutes les actions et tâches à faire à partir du document suivant. 
-Réponds UNIQUEMENT avec un tableau JSON valide, sans texte autour. Format : [{"content": "Description de la tâche"}]
-Si aucune tâche n'est trouvée, renvoie [].
+    const prompt = `Extrais les tâches concrètes à réaliser à partir du document suivant.
+  Considère les actions explicites, les décisions à mettre en œuvre, les engagements et les suivis à effectuer, même s'ils ne sont pas présentés sous un titre « Actions ».
+  Reformule chaque élément comme une tâche courte commençant par un verbe. Ignore les informations purement descriptives, les faits déjà accomplis et les simples sujets discutés.
+  Réponds UNIQUEMENT avec un tableau JSON valide, sans texte autour. Format : [{"content": "Description de la tâche"}]
+  Renvoie [] uniquement si le document ne contient vraiment aucune action future ou aucun suivi concret.
 
 Document :
 ${text}`;
@@ -300,6 +365,7 @@ ${text}`;
     const geminiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent';
     let tasks = [];
     let usedFallback = false;
+    let fallbackReason = 'Gemini est temporairement indisponible';
     try {
       const geminiResponse = await fetch(geminiUrl, {
         method: 'POST',
@@ -308,7 +374,7 @@ ${text}`;
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 512 }
         }),
-        signal: AbortSignal.timeout(10000)
+        signal: AbortSignal.timeout(300000)
       });
 
       if (!geminiResponse.ok) {
@@ -323,25 +389,70 @@ ${text}`;
       if (!Array.isArray(tasks) || tasks.some((task) => typeof task.content !== 'string')) {
         throw new Error('Format de tâches Gemini invalide.');
       }
+      if (tasks.length === 0) {
+        throw new Error('Gemini n’a détecté aucune tâche; vérification locale du compte rendu.');
+      }
     } catch (error) {
-      console.error('Gemini indisponible pour extract-tasks, utilisation du repli local:', error);
+      const noTasksDetected = error instanceof Error && error.message.includes('aucune tâche');
+      if (noTasksDetected) {
+        fallbackReason = 'Gemini n’a détecté aucune tâche';
+        console.info('Gemini n’a détecté aucune tâche; vérification locale du compte rendu.');
+      } else {
+        console.error('Échec de l’extraction Gemini, utilisation du repli local:', error);
+      }
       usedFallback = true;
       const lines = text.split('\n');
       let inActionSection = false;
       const actionLines = [];
+      const allBulletLines = [];
+      const actionParagraphs = [];
+      const directiveLines = [];
+      const directivePattern = /(?:^\s*(?:envoyer|contacter|planifier|préparer|preparer|créer|creer|mettre en place|définir|definir|vérifier|verifier|confirmer|transmettre|organiser|réaliser|realiser|terminer|suivre|relancer|finaliser|attribuer|prévoir|prevoir|établir|etablir|présenter|presenter|choisir|décider|decider|répondre|repondre|communiquer|partager|mettre à jour|mettre au point|identifier|analyser|évaluer|evaluer|valider|lancer|développer|developper|livrer|examiner|documenter|coordonner|approuver|commencer|poursuivre)\b|\b(?:doit|doivent|devra|devront|il faut|à faire|a faire|à réaliser|a realiser|est chargé de|sont chargés de|prévoir de|prevoir de|prévoit de|prevoient de|nous allons|on va|action requise|engagement|suivi à|suivi a|must|should|needs? to|to do)\b)/i;
 
       for (const line of lines) {
-        const heading = line.match(/^\s*#{1,6}\s+(.+)$/);
-        if (heading) {
-          inActionSection = /action|tâche|a faire|à faire|suivi|prochaine étape/i.test(heading[1]);
+        const heading = line.trim()
+          .replace(/^#{1,6}\s*/, '')
+          .replace(/^\d+[.)]?\s*/, '')
+          .replace(/\*\*/g, '')
+          .replace(/[*_`]/g, '')
+          .replace(/[’‘]/g, "'")
+          .replace(/[:：]+$/, '')
+          .trim();
+        const normalizedHeading = heading.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        if (/^(plan d'action|actions?( a| à)?|taches?( a| à)?|a faire|suivi|prochaines? etapes?|decisions?( a| a mettre en oeuvre)?|engagements?|recommandations?)(\b|\s|:)/i.test(normalizedHeading)) {
+          inActionSection = true;
+          continue;
+        }
+        if (/^#{1,6}\s/.test(line.trim()) || /^\*\*.+\*\*:?$/.test(line.trim())) {
+          inActionSection = false;
+        }
+
+        const item = line.match(/^\s*(?:[-*•–—☐☑✓]|\d+[.)])\s+(?:\[[ xX]\]|[☐☑✓])?\s*(.+)$/);
+        if (!item) {
+          const paragraph = line.replace(/^\s*\*\*|\*\*\s*$/g, '').trim();
+          if (paragraph && inActionSection) actionParagraphs.push(paragraph);
+          if (paragraph && directivePattern.test(paragraph)) directiveLines.push(paragraph);
           continue;
         }
 
-        const item = line.match(/^\s*(?:[-*•]|\d+[.)])\s+(.+)$/);
-        if (inActionSection && item) actionLines.push(item[1].trim());
+        const content = item[1].replace(/\*\*/g, '').trim();
+        if (inActionSection) actionLines.push(content);
+        allBulletLines.push(content);
       }
 
-      tasks = [...new Set(actionLines.filter(Boolean))].map((content) => ({ content }));
+      const actionVerb = /^(?:a|à)\s+faire\b|^(?:envoyer|contacter|planifier|préparer|preparer|créer|creer|mettre en place|définir|definir|vérifier|verifier|confirmer|transmettre|organiser|réaliser|realiser|terminer|suivre|relancer|finaliser|attribuer|prévoir|prevoir|établir|etablir|présenter|presenter|choisir|décider|decider|répondre|repondre|communiquer|partager|mettre à jour|mettre au point|identifier|analyser|évaluer|evaluer|valider|lancer|développer|developper|livrer|examiner|documenter|coordonner|approuver|commencer|poursuivre)\b/i;
+      const splitParagraphs = (paragraphs) => paragraphs.flatMap((paragraph) => paragraph
+        .split(/(?<=[.!?])\s+/)
+        .map((sentence) => sentence.replace(/\*\*/g, '').replace(/^[-*•\s]+/, '').trim())
+        .filter(Boolean));
+      const candidates = actionLines.length
+        ? actionLines
+        : splitParagraphs(actionParagraphs).length
+          ? splitParagraphs(actionParagraphs)
+          : allBulletLines.filter((content) => actionVerb.test(content)).length
+            ? allBulletLines.filter((content) => actionVerb.test(content))
+            : splitParagraphs(directiveLines);
+      tasks = [...new Set(candidates.filter(Boolean))].map((content) => ({ content }));
     }
 
     if (reportId && tasks.length > 0) {
@@ -350,16 +461,20 @@ ${text}`;
         user_id: user.id,
         content: t.content
       }));
-      const { error: insertError } = await supabase.from('tasks').insert(tasksToInsert);
+      const { data: savedTasks, error: insertError } = await supabase
+        .from('tasks')
+        .insert(tasksToInsert)
+        .select('id, content, is_done');
       if (insertError) {
         console.error('Erreur Supabase insert tasks:', insertError);
         return c.json({ tasks, warning: 'Les tâches ont été extraites mais n’ont pas pu être sauvegardées.', usedFallback });
       }
+      tasks = savedTasks || tasks;
     }
 
     return c.json({
       tasks,
-      ...(usedFallback ? { warning: tasks.length ? 'Gemini est indisponible; les actions ont été extraites des puces de la section Actions.' : 'Gemini est indisponible et aucune puce de la section Actions n’a été trouvée.' } : {})
+      ...(usedFallback ? { warning: tasks.length ? `${fallbackReason}; les actions ont été extraites du compte rendu.` : `${fallbackReason} et aucune action identifiable n’a été trouvée dans le compte rendu.` } : {})
     });
   } catch (error) {
     console.error('Erreur extraction des tâches:', error);
