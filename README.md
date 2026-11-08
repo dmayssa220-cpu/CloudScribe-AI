@@ -78,4 +78,7 @@ Le point de contrôle du Worker est disponible à l’adresse `http://localhost:
 
 ## Variables d’environnement
 
-Wrangler charge les valeurs locales depuis `worker/.dev.vars`.
+Le frontend et le Worker utilisent des fichiers d’environnement distincts :
+
+- Frontend : créez `cloudscribe-frontend/.env.local` depuis `cloudscribe-frontend/.env.example`, puis renseignez `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY` avec les informations publiques du projet Supabase. Ne mettez jamais la clé `service_role` dans le frontend.
+- Worker : Wrangler charge les valeurs locales depuis `worker/.dev.vars`.

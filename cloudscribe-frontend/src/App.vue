@@ -27,6 +27,8 @@ const handleLogout = async () => {
       <router-link to="/">Accueil</router-link>
       <router-link to="/pricing">Tarifs</router-link>
       <router-link to="/history">Historique</router-link>
+      <router-link to="/workspaces">Équipes</router-link>
+      <router-link to="/settings">Paramètres</router-link>
     </div>
     <div v-if="user" class="nav-user">
       <span>{{ user.email }}</span>

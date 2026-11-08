@@ -19,8 +19,6 @@ const getSupabaseAdmin = (env) => {
 };
 
 app.get('/api/health', (c) => c.json({ status: 'ok' }));
-
-
 app.post('/api/generate', async (c) => {
   try {
     
@@ -31,20 +29,35 @@ app.post('/api/generate', async (c) => {
     const supabase = getSupabaseAuth(c.env, token);
     const { data: { user }, error: authError } = await supabase.auth.getUser();
     if (authError || !user) return c.json({ error: 'Token invalide' }, 401);
-
-  
     const body = await c.req.json();
     const notes = body.notes || '';
     const tier = body.tier || 'normal';
     const imageBase64 = body.image;
     const imageMimeType = body.mimeType;
-
+    const workspaceId = body.workspaceId || null;
+    const template = body.template;
+    const outputLanguage = body.outputLanguage;
+    const supabaseAdmin = getSupabaseAdmin(c.env);
     
+
     if (!notes.trim() && !imageBase64) {
       return c.json({ error: 'Les notes et l\'image sont vides.' }, 400);
     }
 
-    
+    if (workspaceId) {
+      const { data: membership, error: membershipError } = await supabaseAdmin
+        .from('workspace_members')
+        .select('workspace_id')
+        .eq('workspace_id', workspaceId)
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (membershipError) {
+        console.error('Erreur de vérification de l’équipe du compte rendu:', membershipError);
+        return c.json({ error: 'Impossible de vérifier l’équipe sélectionnée.' }, 500);
+      }
+      if (!membership) return c.json({ error: 'Vous ne faites pas partie de cette équipe.' }, 403);
+    }
     if (tier === 'premium') {
       const { data: sub } = await supabase
         .from('subscriptions')
@@ -55,9 +68,7 @@ app.post('/api/generate', async (c) => {
       if (!sub || sub.plan !== 'premium') {
         return c.json({ error: 'Abonnement Premium requis pour ce niveau.' }, 403);
       }
-    }
-
-   
+    }   
     let systemPrompt = '';
         if (tier === 'premium') {
       systemPrompt = "Tu es un assistant exécutif. Génère un compte rendu détaillé avec : un titre principal (en utilisant ##), un résumé exécutif (3 phrases), des points clés (4-6), et un plan d'action avec responsables et échéances si mentionnés. Utilise le format Markdown pour les titres (##, ###), le gras (**texte**) et les listes à puces (-). Sois formel et structuré.";
@@ -67,9 +78,7 @@ app.post('/api/generate', async (c) => {
       systemPrompt = "Tu es un assistant concis. Génère un compte rendu simple avec : un titre (##) et 3 points clés maximum. Utilise le format Markdown. Va droit au but.";
     }
 
-    const fullPrompt = `${systemPrompt}\n\nVoici les notes brutes à transformer :\n"""\n${notes}\n"""\n\nRéponds uniquement avec le compte rendu formaté, sans aucune introduction.`;
-
-    
+    const fullPrompt = `${systemPrompt}\n\nVoici les notes brutes à transformer :\n"""\n${notes}\n"""\n\nRéponds uniquement avec le compte rendu formaté, sans aucune introduction.`;    
     const parts = [{ text: fullPrompt }];
     
     if (imageBase64 && imageMimeType) {
@@ -79,9 +88,7 @@ app.post('/api/generate', async (c) => {
           data: imageBase64
         }
       });
-    }
-
-    
+    }   
     const geminiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent';
     const geminiResponse = await fetch(geminiUrl, {
       method: 'POST',
@@ -138,7 +145,7 @@ Réponds UNIQUEMENT avec un objet JSON valide (sans markdown) contenant :
 
 Notes : ${notes}`;
 
-      const sentResponse = await fetch(geminiUrl, {
+    const sentResponse = await fetch(geminiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.env.GEMINI_API_KEY },
         body: JSON.stringify({
@@ -154,15 +161,25 @@ Notes : ${notes}`;
     } catch (e) {
       console.error("Erreur analyse sentiment:", e);
     }
-   
-    const { data, error: dbError } = await supabase
+    const { data: settings } = await supabase.from('user_settings').select('custom_prompt').eq('user_id', user.id).single();
+    const customPrompt = settings?.custom_prompt || '';
+    let templateInstruction = "";
+if (template === 'agile') {
+  templateInstruction = "Structure le compte rendu avec les titres suivants : ## Hier, ## Aujourd'hui, ## Blocages.";
+} else if (template === 'commercial') {
+  templateInstruction = "Structure le compte rendu avec les titres suivants : ## Besoin du client, ## Solution proposée, ## Prochaines étapes.";
+}
+const languageInstruction = `Génère le compte rendu en langue : ${outputLanguage || 'Français'}.`;
+const finalPrompt = `${systemPrompt}\n${templateInstruction}\n${languageInstruction}\nInstructions supplémentaires de l'utilisateur : ${customPrompt}\n\nVoici les notes :\n${notes}`;
+    const { data, error: dbError } = await supabaseAdmin
       .from('reports')
       .insert({
         raw_notes: notes,
         generated_text: generatedText,
         tier: tier,
         user_id: user.id,
-         image_base64: imageBase64 || null,     
+        workspace_id: workspaceId,
+        image_base64: imageBase64 || null,     
         image_mime_type: imageMimeType || null  ,
         sentiment: sentimentData.sentiment,      
         sentiment_score: sentimentData.score,  
@@ -173,7 +190,7 @@ Notes : ${notes}`;
 
     if (dbError) {
       console.error('Erreur Supabase insert:', dbError);
-      return c.json({ success: true, tier, result: generatedText, warning: 'Non sauvegardé.' });
+      return c.json({ error: 'Le compte rendu a été généré, mais n’a pas pu être sauvegardé.', details: dbError.message }, 500);
     }
 
     return c.json({ success: true, tier, result: generatedText, id: data.id });
@@ -191,17 +208,39 @@ app.get('/api/history', async (c) => {
     if (!authHeader) return c.json({ error: 'Non autorisé' }, 401);
     const token = authHeader.replace('Bearer ', '');
     const supabase = getSupabaseAuth(c.env, token);
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return c.json({ error: 'Token invalide' }, 401);
 
-    const { data, error } = await supabase
+    const supabaseAdmin = getSupabaseAdmin(c.env);
+    const { data: memberships, error: membershipsError } = await supabaseAdmin
+      .from('workspace_members')
+      .select('workspace_id')
+      .eq('user_id', user.id);
+
+    if (membershipsError) {
+      console.error('Erreur récupération des équipes pour l’historique:', membershipsError);
+      return c.json({ error: 'Impossible de récupérer l\'historique.' }, 500);
+    }
+
+    const workspaceIds = memberships.map((membership) => membership.workspace_id);
+    let query = supabaseAdmin
       .from('reports')
       .select('id, created_at, tier, generated_text, image_base64, image_mime_type')
       .order('created_at', { ascending: false })
       .limit(20);
+    query = workspaceIds.length
+      ? query.or(`user_id.eq.${user.id},workspace_id.in.(${workspaceIds.join(',')})`)
+      : query.eq('user_id', user.id);
+    const { data, error } = await query;
 
-    if (error) return c.json({ error: 'Impossible de récupérer l\'historique.' }, 500);
+    if (error) {
+      console.error('Erreur récupération de l’historique:', error);
+      return c.json({ error: 'Impossible de récupérer l\'historique.' }, 500);
+    }
 
     return c.json({ history: data });
   } catch (error) {
+    console.error('Erreur interne lors de la récupération de l’historique:', error);
     return c.json({ error: 'Erreur interne du serveur.' }, 500);
   }
 });
@@ -485,6 +524,78 @@ ${text}`;
   }
 });
 
+app.post('/api/share', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader) return c.json({ error: 'Non autorisé' }, 401);
+    const supabase = getSupabaseAuth(c.env, authHeader.replace('Bearer ', ''));
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return c.json({ error: 'Token invalide' }, 401);
+
+    const { reportId } = await c.req.json();
+    if (!reportId) return c.json({ error: 'Identifiant du compte rendu manquant.' }, 400);
+    const supabaseAdmin = getSupabaseAdmin(c.env);
+    const { data: report, error: reportError } = await supabaseAdmin
+      .from('reports')
+      .select('id, user_id, workspace_id')
+      .eq('id', reportId)
+      .maybeSingle();
+
+    if (reportError) {
+      console.error('Erreur de vérification du compte rendu à partager:', reportError);
+      return c.json({ error: 'Impossible de vérifier le compte rendu.' }, 500);
+    }
+    if (!report) return c.json({ error: 'Compte rendu introuvable.' }, 404);
+
+    let canShare = report.user_id === user.id;
+    if (!canShare && report.workspace_id) {
+      const { data: membership, error: membershipError } = await supabaseAdmin
+        .from('workspace_members')
+        .select('workspace_id')
+        .eq('workspace_id', report.workspace_id)
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (membershipError) {
+        console.error('Erreur de vérification de l’équipe du compte rendu à partager:', membershipError);
+        return c.json({ error: 'Impossible de vérifier les droits de partage.' }, 500);
+      }
+      canShare = Boolean(membership);
+    }
+    if (!canShare) return c.json({ error: 'Vous n’êtes pas autorisé à partager ce compte rendu.' }, 403);
+
+    const { data, error } = await supabaseAdmin
+      .from('reports')
+      .update({ share_token: crypto.randomUUID() })
+      .eq('id', reportId)
+      .select('share_token')
+      .single();
+
+    if (error) {
+      console.error('Erreur Supabase partage:', error);
+      return c.json({ error: 'Erreur lors de la création du lien de partage.', details: error.message }, 500);
+    }
+    return c.json({ shareToken: data.share_token });
+  } catch (error) {
+    console.error('Erreur interne lors du partage:', error);
+    return c.json({ error: 'Erreur interne lors de la création du lien de partage.' }, 500);
+  }
+});
+
+
+app.get('/api/share/:token', async (c) => {
+  const shareToken = c.req.param('token');
+  const supabaseAdmin = getSupabaseAdmin(c.env);
+  
+  const { data, error } = await supabaseAdmin
+    .from('reports')
+    .select('generated_text, tier, created_at, sentiment, sentiment_score, sentiment_explication')
+    .eq('share_token', shareToken)
+    .single();
+
+  if (error || !data) return c.json({ error: 'Lien introuvable ou expiré.' }, 404);
+  return c.json({ report: data });
+});
 app.post('/api/translate', async (c) => {
   try {
   
@@ -536,5 +647,129 @@ ${text}
     console.error('Erreur traduction:', error);
     return c.json({ error: 'Erreur lors de la traduction.' }, 500);
   }
+});
+app.post('/api/workspaces', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader) return c.json({ error: 'Non autorisé' }, 401);
+    const supabase = getSupabaseAuth(c.env, authHeader.replace('Bearer ', ''));
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return c.json({ error: 'Token invalide' }, 401);
+
+    const { name } = await c.req.json();
+    const workspaceName = typeof name === 'string' ? name.trim() : '';
+    if (!workspaceName) return c.json({ error: 'Le nom de l’équipe est obligatoire.' }, 400);
+
+    const supabaseAdmin = getSupabaseAdmin(c.env);
+    const { data: workspace, error: wsError } = await supabaseAdmin
+      .from('workspaces')
+      .insert({ name: workspaceName, owner_id: user.id })
+      .select()
+      .single();
+
+    if (wsError) {
+      console.error('Erreur Supabase création équipe:', wsError);
+      return c.json({ error: 'Erreur lors de la création de l’équipe.', details: wsError.message }, 500);
+    }
+
+    const { error: memberError } = await supabaseAdmin
+      .from('workspace_members')
+      .insert({ workspace_id: workspace.id, user_id: user.id, role: 'owner' });
+
+    if (memberError) {
+      console.error('Erreur Supabase ajout du propriétaire à l’équipe:', memberError);
+      const { error: cleanupError } = await supabaseAdmin
+        .from('workspaces')
+        .delete()
+        .eq('id', workspace.id);
+      if (cleanupError) console.error('Erreur nettoyage de l’équipe incomplète:', cleanupError);
+      return c.json({ error: 'L’équipe a été créée, mais son propriétaire n’a pas pu être ajouté.', details: memberError.message }, 500);
+    }
+
+    return c.json({ workspace });
+  } catch (error) {
+    console.error('Erreur interne création équipe:', error);
+    return c.json({ error: 'Erreur interne lors de la création de l’équipe.' }, 500);
+  }
+});
+app.get('/api/workspaces', async (c) => {
+  try {
+    const authHeader = c.req.header('Authorization');
+    if (!authHeader) return c.json({ error: 'Non autorisé' }, 401);
+    const supabase = getSupabaseAuth(c.env, authHeader.replace('Bearer ', ''));
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) return c.json({ error: 'Token invalide' }, 401);
+
+    const supabaseAdmin = getSupabaseAdmin(c.env);
+    const { data, error } = await supabaseAdmin
+      .from('workspace_members')
+      .select('workspace_id, role, workspaces(name)')
+      .eq('user_id', user.id);
+
+    if (error) {
+      console.error('Erreur Supabase récupération équipes:', error);
+      return c.json({ error: 'Erreur lors de la récupération des équipes.', details: error.message }, 500);
+    }
+    return c.json({ workspaces: data });
+  } catch (error) {
+    console.error('Erreur interne récupération équipes:', error);
+    return c.json({ error: 'Erreur interne lors de la récupération des équipes.' }, 500);
+  }
+});
+
+app.post('/api/workspaces/invite', async (c) => {
+  const authHeader = c.req.header('Authorization');
+  const supabase = getSupabaseAuth(c.env, authHeader.replace('Bearer ', ''));
+  const { workspaceId, email } = await c.req.json();
+
+  
+  const { error } = await supabase
+    .from('workspace_invitations')
+    .insert({ workspace_id: workspaceId, email: email });
+
+  if (error) return c.json({ error: 'Erreur lors de l\'invitation' }, 500);
+  return c.json({ success: true, message: 'Invitation envoyée (simulée).' });
+});
+
+app.post('/api/workspaces/accept-invites', async (c) => {
+  const authHeader = c.req.header('Authorization');
+  const supabase = getSupabaseAuth(c.env, authHeader.replace('Bearer ', ''));
+  const { data: { user } } = await supabase.auth.getUser();
+  const { data: invites } = await supabase
+    .from('workspace_invitations')
+    .select('*')
+    .eq('email', user.email)
+    .eq('status', 'pending');
+
+  if (invites && invites.length > 0) {
+    for (const invite of invites) {
+    
+      await supabase.from('workspace_members').insert({
+        workspace_id: invite.workspace_id,
+        user_id: user.id,
+        role: 'member'
+      });
+     
+      await supabase.from('workspace_invitations').update({ status: 'accepted' }).eq('id', invite.id);
+    }
+  }
+  return c.json({ success: true });
+});
+app.post('/api/comments', async (c) => {
+  const authHeader = c.req.header('Authorization');
+  const supabase = getSupabaseAuth(c.env, authHeader.replace('Bearer ', ''));
+  const { data: { user } } = await supabase.auth.getUser();
+  
+  const { reportId, selectedText, commentText } = await c.req.json();
+  
+  const { error } = await supabase.from('comments').insert({
+    report_id: reportId,
+    user_id: user.id,
+    selected_text: selectedText,
+    comment_text: commentText
+  });
+  
+  if (error) return c.json({ error: 'Erreur' }, 500);
+  return c.json({ success: true });
 });
 export default app;

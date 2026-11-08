@@ -5,6 +5,8 @@ import SuccessView from '../views/SuccessView.vue'
 import LoginView from '../views/LoginView.vue'
 import HistoryView from '../views/HistoryView.vue'
 import { supabase } from '../supabase'
+import ShareView from '../views/ShareView.vue'
+import WorkspaceView from '../views/WorkspaceView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -14,6 +16,8 @@ const router = createRouter({
     { path: '/success', name: 'success', component: SuccessView },
     { path: '/login', name: 'login', component: LoginView },
     { path: '/history', name: 'history', component: HistoryView },
+    { path: '/share/:token', name: 'share', component: ShareView },
+    { path: '/workspaces', name: 'workspaces', component: WorkspaceView },
   ]
 })
 router.beforeEach(async (to) => {

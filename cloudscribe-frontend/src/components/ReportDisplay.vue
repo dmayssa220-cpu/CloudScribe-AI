@@ -1,10 +1,11 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { marked } from 'marked';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { supabase } from '../supabase';
 import ReportChat from './ReportChat.vue';
+
 
 const props = defineProps({
   id: { type: String, default: null },
@@ -27,6 +28,11 @@ const selectedLang = ref('fr');
 const tasks = ref([]);
 const isExtracting = ref(false);
 const tasksError = ref('');
+const isSharing = ref(false);
+const shareError = ref('');
+const selectedText = ref('');
+const commentInput = ref('');
+const comments = ref([]);
 
 
 const htmlContent = computed(() => marked.parse(currentContent.value || ''));
@@ -145,12 +151,71 @@ const sentimentColor = computed(() => {
   if (props.sentimentScore < 40) return '#e53e3e'; 
   return '#d69e2e'; 
 });
+const generateShareLink = async () => {
+  if (!props.id) {
+    shareError.value = "Ce compte rendu n’a pas été sauvegardé et ne peut pas être partagé.";
+    return;
+  }
+  isSharing.value = true;
+  shareError.value = '';
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) throw new Error('Vous devez être connecté pour partager ce compte rendu.');
+    const res = await fetch('http://localhost:8787/api/share', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+      body: JSON.stringify({ reportId: props.id })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erreur lors de la création du lien.');
+    if (!data.shareToken) throw new Error('Le lien de partage n’a pas pu être créé.');
+
+    const url = `${window.location.origin}/share/${data.shareToken}`;
+    await navigator.clipboard.writeText(url);
+    alert("Lien de partage copié dans le presse-papiers !\n" + url);
+  } catch (err) {
+    shareError.value = err instanceof Error ? err.message : "Erreur lors de la création du lien.";
+  } finally {
+    isSharing.value = false;
+  }
+};
+const handleTextSelection = () => {
+  const selection = window.getSelection();
+  const text = selection.toString().trim();
+  
+  if (text.length > 5) {
+    selectedText.value = text;
+  }
+};
+
+const loadComments = async () => {
+  if (!props.id) return;
+  const { data } = await supabase.from('comments').select('*').eq('report_id', props.id);
+  if (data) comments.value = data;
+};
+onMounted(() => { loadComments(); });
+
+const submitComment = async () => {
+  if (!commentInput.value.trim()) return;
+  const { data: { session } } = await supabase.auth.getSession();
+  await fetch('http://localhost:8787/api/comments', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+    body: JSON.stringify({ 
+      reportId: props.id, 
+      selectedText: selectedText.value, 
+      commentText: commentInput.value 
+    })
+  });
+  commentInput.value = '';
+  showCommentBox.value = false;
+  loadComments(); 
+};
 </script>
 
 <template>
   <div class="report-wrapper">
-   
-    <div class="top-toolbar">
+     <div class="top-toolbar">
       <div class="lang-selector">
         <span>🌐 Traduire :</span>
         <select v-model="selectedLang" @change="translateReport" :disabled="isTranslating">
@@ -162,9 +227,7 @@ const sentimentColor = computed(() => {
         </select>
         <span v-if="isTranslating" class="translating-text">Traduction...</span>
       </div>
-    </div>
-
-    
+    </div>    
     <div :id="`report-${date}`" class="report-design">
       <div class="report-header">
         <div class="logo-area">
@@ -174,7 +237,7 @@ const sentimentColor = computed(() => {
         <span class="date">{{ formattedDate }}</span>
       </div>
       
-      <div class="report-body markdown-body" v-html="htmlContent"></div>
+      <div class="report-body markdown-body" @mouseup="handleTextSelection" v-html="htmlContent"></div>
 
       <div v-if="getImageSrc" class="report-image">
         <p class="image-title">📸 Image source analysée :</p>
@@ -185,7 +248,15 @@ const sentimentColor = computed(() => {
         Document confidentiel généré par CloudScribe AI
       </div>
     </div>
-
+<div class="sentiment-banner" v-if="sentiment">
+        <div class="sentiment-header">
+          <span class="sentiment-badge" :style="{ color: sentimentColor, borderColor: sentimentColor }">
+            {{ sentiment }}
+          </span>
+          <span class="sentiment-score">Score : {{ sentimentScore }}/100</span>
+        </div>
+        <p class="sentiment-desc">{{ sentimentExplication }}</p>
+      </div>
     
     <div class="action-bar">
       <button @click="copyToClipboard" class="action-btn btn-gray" :title="isCopied ? 'Copié !' : 'Copier le texte'">
@@ -194,8 +265,11 @@ const sentimentColor = computed(() => {
       <button @click="downloadPDF" class="action-btn btn-blue" :disabled="isDownloading" title="Télécharger PDF">
         {{ isDownloading ? '⏳' : '📥' }}
       </button>
-      <button @click="shareNative" class="action-btn btn-green" title="Partager le fichier">📤</button>
+      <button @click="generateShareLink" class="action-btn btn-purple" :disabled="isSharing" title="Partager par lien public">
+        {{ isSharing ? '⏳' : '🔗' }}
+      </button>
     </div>
+    <p v-if="shareError" class="share-error">{{ shareError }}</p>
 
     
     <div class="tasks-section">
@@ -210,10 +284,21 @@ const sentimentColor = computed(() => {
           <span :class="{ 'done': task.is_done }">{{ task.content }}</span>
         </div>
       </div>
-    </div>
-
-    
+    </div>    
     <ReportChat v-if="currentContent" :documentText="currentContent" />
+    <div class="report-body" @mouseup="handleTextSelection" v-html="htmlContent"></div>
+    <div v-if="showCommentBox" class="comment-popup">
+    <p>Commenter : "<em>{{ selectedText }}</em>"</p>
+    <textarea v-model="commentInput" placeholder="Votre commentaire..."></textarea>
+    <button @click="submitComment">Enregistrer</button>
+  </div>
+    <div class="comments-section" v-if="props.id">
+  <h4>💬 Commentaires de l'équipe</h4>
+  <div v-for="c in comments" :key="c.id" class="comment-item">
+    <p class="comment-quote">"{{ c.selected_text }}"</p>
+    <p class="comment-text">{{ c.comment_text }}</p>
+  </div>
+</div>
   </div>
 </template>
 
@@ -344,6 +429,7 @@ const sentimentColor = computed(() => {
   background: white;
 }
 .action-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 15px rgba(0,0,0,0.1); }
+.btn-purple { color: #805ad5; border: 1px solid #e9d8fd; background: #faf5ff; }
 .btn-gray { color: #4a5568; border: 1px solid #e2e8f0; }
 .btn-blue { color: #3182ce; border: 1px solid #bee3f8; background: #ebf8ff; }
 .btn-green { color: #38a169; border: 1px solid #c6f6d5; background: #f0fff4; }
@@ -360,4 +446,20 @@ const sentimentColor = computed(() => {
 .task-item { display: flex; align-items: center; gap: 10px; font-size: 0.95rem; color: #2d3748; }
 .task-item input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; accent-color: #38a169; }
 .task-item .done { text-decoration: line-through; color: #a0aec0; }
+.sentiment-banner { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 25px; }
+.sentiment-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.sentiment-badge { font-weight: 700; padding: 4px 12px; border-radius: 20px; border: 2px solid; font-size: 0.85rem; text-transform: uppercase; }
+.sentiment-score { font-weight: 600; color: #4a5568; font-size: 0.9rem; }
+.sentiment-desc { font-size: 0.9rem; color: #718096; margin: 0; }
+.share-error { color: #b42318; margin: 10px 0 0; text-align: center; }
+.comments-section { width: 100%; max-width: 800px; margin-top: 20px; padding: 20px; box-sizing: border-box; background: white; border: 1px solid #e2e8f0; border-radius: 12px; }
+.comments-section h3 { margin: 0 0 8px; color: #2d3748; }
+.comment-hint, .selected-quote { color: #718096; margin: 8px 0; }
+.comments-section textarea { width: 100%; min-height: 90px; box-sizing: border-box; padding: 12px; border: 1px solid #cbd5e0; border-radius: 8px; font: inherit; resize: vertical; }
+.comments-section button { margin-top: 10px; padding: 10px 16px; border: 0; border-radius: 8px; background: #3182ce; color: white; font-weight: 600; cursor: pointer; }
+.comments-section button:disabled { background: #a0aec0; cursor: not-allowed; }
+.comment-list { display: grid; gap: 12px; padding: 0; list-style: none; }
+.comment-list li { padding: 12px; background: #f8fafc; border-radius: 8px; color: #4a5568; }
+.comment-list blockquote { margin: 0 0 8px; padding-left: 10px; border-left: 3px solid #90cdf4; color: #718096; }
+.comment-list p { margin: 0; white-space: pre-wrap; }
 </style>

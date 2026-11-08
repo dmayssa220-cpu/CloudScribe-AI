@@ -3,11 +3,9 @@ import { onMounted, ref } from 'vue';
 import { supabase } from '../supabase';
 import * as pdfjsLib from 'pdfjs-dist';
 import ReportDisplay from '../components/ReportDisplay.vue';
-
-
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 const notes = ref('');
 const tier = ref('normal');
@@ -18,13 +16,28 @@ const errorMsg = ref('');
 const fileInput = ref(null);
 const imageBase64 = ref(null);
 const imageMimeType = ref(null);
+const workspaces = ref([]);
+const selectedWorkspace = ref(null);
+const template = ref('classic');
+const outputLanguage = ref('Français');
 
-onMounted(() => {
+onMounted(async () => {
   const savedResult = sessionStorage.getItem('cloudscribe-result');
   if (savedResult) result.value = savedResult;
+  reportId.value = sessionStorage.getItem('cloudscribe-report-id');
+ try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const res = await fetch('http://localhost:8787/api/workspaces', {
+      headers: { 'Authorization': `Bearer ${session.access_token}` }
+    });
+    const data = await res.json();
+    if (data.workspaces) workspaces.value = data.workspaces;
+  } catch (err) {
+    console.log("Erreur chargement équipes", err);
+  }
 });
 
-// Gestion des fichiers (PDF et Image)
+
 const handleFileUpload = async (event) => {
   const file = event.target.files[0];
   if (!file) return;
@@ -60,7 +73,7 @@ const handleFileUpload = async (event) => {
   }
 };
 
-// Génération du compte rendu
+
 const generateReport = async () => {
   if (!notes.value.trim() && !imageBase64.value) {
     errorMsg.value = "Veuillez entrer des notes ou joindre un fichier.";
@@ -85,16 +98,19 @@ const generateReport = async () => {
         notes: notes.value, 
         tier: tier.value, 
         image: imageBase64.value, 
-        mimeType: imageMimeType.value 
+        mimeType: imageMimeType.value,
+        workspaceId: selectedWorkspace.value
       })
     });
     
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || 'Erreur lors de la génération');
+    if (!data.id) throw new Error(data.error || 'Le compte rendu a été généré, mais il n’a pas été sauvegardé.');
     
     result.value = data.result;
-    reportId.value = data.id || null;
+    reportId.value = data.id;
     sessionStorage.setItem('cloudscribe-result', data.result);
+    sessionStorage.setItem('cloudscribe-report-id', data.id);
   } catch (err) {
     errorMsg.value = err.message;
   } finally {
@@ -102,7 +118,7 @@ const generateReport = async () => {
   }
 };
 
-// Effacer le formulaire
+
 const clearForm = () => {
   notes.value = '';
   imageBase64.value = null;
@@ -110,18 +126,17 @@ const clearForm = () => {
   result.value = '';
   reportId.value = null;
   sessionStorage.removeItem('cloudscribe-result');
+  sessionStorage.removeItem('cloudscribe-report-id');
 };
 </script>
 
 <template>
   <div class="container">
-    <!-- En-tête -->
+   
     <div class="header-title">
       <h1>CloudScribe <span>AI</span></h1>
       <p>Transformez vos notes désordonnées en comptes rendus impeccables en quelques secondes.</p>
     </div>
-    
-    <!-- Formulaire de saisie -->
     <div class="card input-card">
       <div class="card-header">
         <div class="file-upload">
@@ -155,18 +170,46 @@ const clearForm = () => {
           <label :class="{ active: tier === 'premium' }">
             <input type="radio" value="premium" v-model="tier"> Premium ⭐
           </label>
+          <span class="label-tier">Template de structure :</span>
+         
         </div>
       </div>
-
+      <div class="options-group">
+  <span class="label-tier">Template de structure :</span>
+  <select v-model="template" class="workspace-select">
+    <option value="classic">Classique (Standard)</option>
+    <option value="agile">Agile / Scrum (Hier/Aujourd'hui/Blocages)</option>
+    <option value="commercial">Commercial (Besoin/Solution/Prochaines étapes)</option>
+  </select>
+</div>
+<div class="options-group">
+  <span class="label-tier">Langue de sortie :</span>
+  <select v-model="outputLanguage" class="workspace-select">
+    <option value="Français">Français</option>
+    <option value="Anglais">Anglais</option>
+    <option value="Espagnol">Espagnol</option>
+  </select>
+</div>
+<div class="options-group" v-if="workspaces.length > 0">
+        <span class="label-tier">Générer pour :</span>
+        <select v-model="selectedWorkspace" class="workspace-select">
+          <option :value="null">👤 Moi-même (Personnel)</option>
+          <option v-for="ws in workspaces" :key="ws.workspace_id" :value="ws.workspace_id">
+            🏢 {{ ws.workspaces.name }}
+          </option>
+        </select>
+        
+      </div>
       <button @click="generateReport" :disabled="loading" class="btn-primary">
         <span v-if="loading" class="spinner"></span>
         {{ loading ? 'Génération magique...' : 'Générer le compte rendu' }}
       </button>
       
       <p v-if="errorMsg" class="error">⚠️ {{ errorMsg }}</p>
+      
     </div>
 
-    <!-- Affichage du résultat via le composant réutilisable -->
+    
     <ReportDisplay 
       v-if="result" 
       :id="reportId"
@@ -180,7 +223,7 @@ const clearForm = () => {
 </template>
 
 <style scoped>
-/* --- THÈME GLOBAL --- */
+
 .container { 
   max-width: 900px; 
   margin: 40px auto; 
@@ -189,13 +232,12 @@ const clearForm = () => {
   color: #1a202c;
 }
 
-/* --- EN-TÊTE --- */
 .header-title { text-align: center; margin-bottom: 40px; }
 .header-title h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 10px; letter-spacing: -1px; }
 .header-title h1 span { color: #3182ce; }
 .header-title p { color: #718096; font-size: 1.1rem; max-width: 600px; margin: 0 auto; }
 
-/* --- CARTE DU FORMULAIRE --- */
+
 .card { 
   background: white; 
   padding: 30px; 
@@ -218,7 +260,7 @@ const clearForm = () => {
 }
 .btn-clear:hover { transform: scale(1.1) rotate(5deg); }
 
-/* --- ZONE DE TEXTE --- */
+
 textarea { 
   width: 100%; 
   padding: 16px; 
@@ -240,7 +282,7 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.1);
 }
 
-/* --- UPLOAD --- */
+
 .file-upload { display: flex; align-items: center; gap: 10px; }
 input[type="file"] { display: none; }
 .btn-upload { 
@@ -266,7 +308,7 @@ input[type="file"] { display: none; }
   border-radius: 6px; 
 }
 
-/* --- OPTIONS (NIVEAUX) --- */
+
 .options-group { margin-bottom: 25px; }
 .label-tier { display: block; font-size: 0.9rem; color: #4a5568; margin-bottom: 10px; font-weight: 600; }
 .options { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -291,7 +333,7 @@ input[type="file"] { display: none; }
 }
 .options input[type="radio"] { display: none; }
 
-/* --- BOUTON PRINCIPAL --- */
+
 .btn-primary { 
   width: 100%; 
   background: #3182ce; 
@@ -311,11 +353,21 @@ input[type="file"] { display: none; }
 }
 .btn-primary:hover { background: #2b6cb0; transform: translateY(-1px); box-shadow: 0 6px 15px rgba(49, 130, 206, 0.4); }
 .btn-primary:disabled { background: #a0aec0; cursor: not-allowed; box-shadow: none; transform: none; }
-
-/* --- ERREUR --- */
+.workspace-select {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 15px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+.workspace-select:focus {
+  border-color: #3182ce;
+}
 .error { color: #e53e3e; font-weight: 600; margin-top: 15px; text-align: center; }
-
-/* --- SPINNER --- */
 .spinner {
   display: inline-block; 
   width: 18px; 
